@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CareBox - Pharmacy Management System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @media print {
+            body * { visibility: hidden; }
+            #receipt-modal, #receipt-modal * { visibility: visible; }
+            #receipt-modal { position: absolute; left: 0; top: 0; width: 100%; }
+            .no-print { display: none !important; }
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-100 via-gray-50 to-slate-100">
+    <div id="app"></div>
+
+    <script>
+        // State Management
+        let state = {
+            activeTab: 'billing',
+            customers: JSON.parse(localStorage.getItem('CareBox_customers') || '[]'),
+            transactions: JSON.parse(localStorage.getItem('CareBox_transactions') || '[]'),
+            selectedCustomer: null,
+            currentMedicines: [],
+            showReceipt: null,
+            searchPhone: '',
+            showNewForm: false,
+            newCustomer: { name: '', phone: '', address: '' },
+            newMedicine: {
+                name: '',
+                quantity: 1,
+                price: 0,
+                expiryDate: '',
+                dosage: { morning: false, evening: false, night: false }
+            }
+        };
+
+        // Helper Functions
+        function saveToLocalStorage() {
+            localStorage.setItem('CareBox_customers', JSON.stringify(state.customers));
+            localStorage.setItem('CareBox_transactions', JSON.stringify(state.transactions));
+        }
+
+        function formatDate(dateString) {
+            return new Date(dateString).toLocaleDateString('en-IN', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        }
+
+        function formatExpiryDate(dateString) {
+            return new Date(dateString).toLocaleDateString('en-IN', {
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric'
+            });
+        }
+
+        function isExpired(dateString) {
+            return dateString && new Date(dateString) < new Date();
+        }
+
+        function isNearExpiry(dateString) {
+            if (!dateString || isExpired(dateString)) return false;
+            return new Date(dateString) < new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        }
+
+        function getDaysUntilExpiry(dateString) {
+            const date = new Date(dateString);
+            const today = new Date();
+            return Math.ceil((date.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        }
+
+        function getTodayTransactions() {
+            const today = new Date().toDateString();
+            return state.transactions.filter(t => new Date(t.date).toDateString() === today);
+        }
+
+        function getTodayRevenue() {
+            return getTodayTransactions().reduce((sum, t) => sum + t.totalAmount, 0);
+        }
+
+        function getTotal() {
+            return state.currentMedicines.reduce((sum, med) => sum + (med.price * med.quantity), 0);
+        }
+
+        // Dosage Shapes Component
+        function renderDosageShapes(dosage, size = 'md') {
+            const sizeClasses = { sm: 'w-4 h-4', md: 'w-6 h-6', lg: 'w-8 h-8' };
+            const sizeClass = sizeClasses[size];
+            
+            return `
+                <div class="flex items-center gap-2">
+                    <div class="flex flex-col items-center gap-1">
+                        <div class="${sizeClass} ${dosage.morning ? 'bg-amber-400 border-amber-500' : 'bg-gray-200 border-gray-300'} border-2 rounded-sm" title="Morning"></div>
+                        <span class="text-xs text-gray-500">AM</span>
+                    </div>
+                    <div class="flex flex-col items-center gap-1">
+                        <div class="${sizeClass} ${dosage.evening ? 'bg-orange-400 border-orange-500' : 'bg-gray-200 border-gray-300'} border-2 rounded-full" title="Evening"></div>
+                        <span class="text-xs text-gray-500">PM</span>
+                    </div>
+                    <div class="flex flex-col items-center gap-1">
+                        <div class="${dosage.night ? 'text-indigo-500' : 'text-gray-300'}" title="Night">
+                            <svg class="${sizeClass}" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 2L22 20H2L12 2Z" />
+                            </svg>
+                        </div>
+                        <span class="text-xs text-gray-500">Night</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderDosageLegend() {
+            return `
+                <div class="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-4 border border-blue-100">
+                    <h4 class="text-sm font-semibold text-gray-700 mb-3">Dosage Instructions Legend</h4>
+                    <div class="flex flex-wrap gap-6">
+                        <div class="flex items-center gap-2">
+                            <div class="w-6 h-6 bg-amber-400 border-2 border-amber-500 rounded-sm"></div>
+                            <span class="text-sm text-gray-600">Morning (Square)</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div class="w-6 h-6 bg-orange-400 border-2 border-orange-500 rounded-full"></div>
+                            <span class="text-sm text-gray-600">Evening (Circle)</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <svg class="w-6 h-6 text-indigo-500" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 2L22 20H2L12 2Z" />
+                            </svg>
+                            <span class="text-sm text-gray-600">Night (Triangle)</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Render Functions
+        function render() {
+            const app = document.getElementById('app');
+            app.innerHTML = `
+                ${renderHeader()}
+                ${renderNav()}
+                <main class="max-w-7xl mx-auto px-4 py-6">
+                    ${state.activeTab === 'billing' ? renderBillingTab() : ''}
+                    ${state.activeTab === 'history' ? renderHistoryTab() : ''}
+                    ${state.activeTab === 'customers' ? renderCustomersTab() : ''}
+                </main>
+                ${state.showReceipt ? renderReceiptModal() : ''}
+                ${renderFooter()}
+            `;
+            attachEventListeners();
+        }
+
+        function renderHeader() {
+            return `
+                <header class="bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 text-white shadow-lg">
+                    <div class="max-w-7xl mx-auto px-4 py-4">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center gap-4">
+                                <div class="p-3 bg-white/20 rounded-xl">
+                                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                                    </svg>
+                                </div>
+                                <div>
+                                    <h1 class="text-2xl font-bold">CareBox</h1>
+                                    <p class="text-emerald-100 text-sm">Pharmacy Management System</p>
+                                </div>
+                            </div>
+                            <div class="hidden md:flex items-center gap-6">
+                                <div class="text-right">
+                                    <p class="text-emerald-100 text-sm">Today's Sales</p>
+                                    <p class="text-2xl font-bold">₹${getTodayRevenue().toFixed(2)}</p>
+                                </div>
+                                <div class="w-px h-12 bg-white/30"></div>
+                                <div class="text-right">
+                                    <p class="text-emerald-100 text-sm">Transactions</p>
+                                    <p class="text-2xl font-bold">${getTodayTransactions().length}</p>
+                                </div>
+                                <div class="w-px h-12 bg-white/30"></div>
+                                <div class="text-right">
+                                    <p class="text-emerald-100 text-sm">Total Customers</p>
+                                    <p class="text-2xl font-bold">${state.customers.length}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </header>
+            `;
+        }
+
+        function renderNav() {
+            const tabs = [
+                { id: 'billing', label: 'New Bill', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />' },
+                { id: 'history', label: 'History', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />' },
+                { id: 'customers', label: 'Customers', icon: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />' }
+            ];
+
+            return `
+                <nav class="bg-white shadow-sm sticky top-0 z-40">
+                    <div class="max-w-7xl mx-auto px-4">
+                        <div class="flex gap-1">
+                            ${tabs.map(tab => `
+                                <button onclick="setActiveTab('${tab.id}')" class="px-6 py-4 font-medium transition-all relative ${state.activeTab === tab.id ? 'text-emerald-600' : 'text-gray-500 hover:text-gray-700'}">
+                                    <span class="flex items-center gap-2">
+                                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">${tab.icon}</svg>
+                                        ${tab.label}
+                                    </span>
+                                    ${state.activeTab === tab.id ? '<span class="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600"></span>' : ''}
+                                </button>
+                            `).join('')}
+                        </div>
+                    </div>
+                </nav>
+            `;
+        }
+
+        function renderBillingTab() {
+            return `
+                <div class="space-y-6">
+                    ${renderDosageLegend()}
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div class="lg:col-span-2 space-y-6">
+                            ${renderCustomerForm()}
+                            ${renderMedicineForm()}
+                        </div>
+                        <div class="lg:col-span-1">
+                            <div class="sticky top-24">
+                                ${renderCurrentBill()}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderCustomerForm() {
+            const filteredCustomers = state.customers.filter(c =>
+                c.phone.includes(state.searchPhone) ||
+                c.name.toLowerCase().includes(state.searchPhone.toLowerCase())
+            );
+
+            return `
+                <div class="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="p-2 bg-emerald-100 rounded-lg">
+                            <svg class="w-6 h-6 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                            </svg>
+                        </div>
+                        <h2 class="text-xl font-bold text-gray-800">Customer Information</h2>
+                    </div>
+
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Search Existing Customer</label>
+                        <input type="text" id="searchPhone" placeholder="Search by phone or name..." value="${state.searchPhone}" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all" />
+                    </div>
+
+                    ${state.searchPhone && filteredCustomers.length > 0 ? `
+                        <div class="mb-4 max-h-48 overflow-y-auto border border-gray-200 rounded-xl">
+                            ${filteredCustomers.map(customer => `
+                                <div onclick="selectCustomer('${customer.id}')" class="p-3 hover:bg-emerald-50 cursor-pointer border-b last:border-b-0 transition-colors">
+                                    <p class="font-medium text-gray-800">${customer.name}</p>
+                                    <p class="text-sm text-gray-500">${customer.phone}</p>
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+
+                    ${!state.showNewForm ? `
+                        <button onclick="toggleNewForm()" class="w-full py-3 border-2 border-dashed border-emerald-300 text-emerald-600 rounded-xl hover:bg-emerald-50 transition-colors font-medium">
+                            + Add New Customer
+                        </button>
+                    ` : `
+                        <div class="space-y-4 mt-4 p-4 bg-gray-50 rounded-xl">
+                            <h3 class="font-semibold text-gray-700">New Customer Details</h3>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-600 mb-1">Full Name *</label>
+                                <input type="text" id="newCustomerName" value="${state.newCustomer.name}" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent" placeholder="Enter customer name" />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-600 mb-1">Phone Number *</label>
+                                <input type="tel" id="newCustomerPhone" value="${state.newCustomer.phone}" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent" placeholder="Enter phone number" />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-600 mb-1">Address</label>
+                                <textarea id="newCustomerAddress" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent" placeholder="Enter address" rows="2">${state.newCustomer.address}</textarea>
+                            </div>
+                            <div class="flex gap-2">
+                                <button onclick="saveNewCustomer()" class="flex-1 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors font-medium">Save Customer</button>
+                                <button onclick="cancelNewCustomer()" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">Cancel</button>
+                            </div>
+                        </div>
+                    `}
+                </div>
+            `;
+        }
+
+        function renderMedicineForm() {
+            const expired = isExpired(state.newMedicine.expiryDate);
+            const nearExpiry = isNearExpiry(state.newMedicine.expiryDate);
+
+            return `
+                <div class="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="p-2 bg-blue-100 rounded-lg">
+                            <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                            </svg>
+                        </div>
+                        <h2 class="text-xl font-bold text-gray-800">Add Medicine</h2>
+                    </div>
+
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Medicine Name *</label>
+                            <input type="text" id="medicineName" value="${state.newMedicine.name}" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" placeholder="Enter medicine name" />
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Quantity *</label>
+                                <input type="number" id="medicineQuantity" min="1" value="${state.newMedicine.quantity}" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Price (₹) *</label>
+                                <input type="number" id="medicinePrice" min="0" step="0.01" value="${state.newMedicine.price || ''}" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all" placeholder="0.00" />
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Expiry Date *</label>
+                            <input type="date" id="medicineExpiry" value="${state.newMedicine.expiryDate}" class="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:border-transparent transition-all ${expired ? 'border-red-500 bg-red-50 focus:ring-red-500' : nearExpiry ? 'border-yellow-500 bg-yellow-50 focus:ring-yellow-500' : 'border-gray-200 focus:ring-blue-500'}" />
+                            ${expired ? `
+                                <p class="text-red-600 text-sm mt-1 font-medium flex items-center gap-1">
+                                    <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                    </svg>
+                                    EXPIRED - Do not sell!
+                                </p>
+                            ` : ''}
+                            ${nearExpiry ? `
+                                <p class="text-yellow-600 text-sm mt-1 font-medium flex items-center gap-1">
+                                    <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                    </svg>
+                                    Expiring soon (within 30 days)
+                                </p>
+                            ` : ''}
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-3">Dosage Schedule</label>
+                            <div class="flex flex-wrap gap-4">
+                                <label class="flex items-center gap-3 p-3 bg-amber-50 rounded-xl border border-amber-200 cursor-pointer hover:bg-amber-100 transition-colors">
+                                    <input type="checkbox" id="dosageMorning" ${state.newMedicine.dosage.morning ? 'checked' : ''} class="w-5 h-5 text-amber-500 rounded focus:ring-amber-500" />
+                                    <div class="w-6 h-6 bg-amber-400 border-2 border-amber-500 rounded-sm"></div>
+                                    <span class="font-medium text-gray-700">Morning</span>
+                                </label>
+
+                                <label class="flex items-center gap-3 p-3 bg-orange-50 rounded-xl border border-orange-200 cursor-pointer hover:bg-orange-100 transition-colors">
+                                    <input type="checkbox" id="dosageEvening" ${state.newMedicine.dosage.evening ? 'checked' : ''} class="w-5 h-5 text-orange-500 rounded focus:ring-orange-500" />
+                                    <div class="w-6 h-6 bg-orange-400 border-2 border-orange-500 rounded-full"></div>
+                                    <span class="font-medium text-gray-700">Evening</span>
+                                </label>
+
+                                <label class="flex items-center gap-3 p-3 bg-indigo-50 rounded-xl border border-indigo-200 cursor-pointer hover:bg-indigo-100 transition-colors">
+                                    <input type="checkbox" id="dosageNight" ${state.newMedicine.dosage.night ? 'checked' : ''} class="w-5 h-5 text-indigo-500 rounded focus:ring-indigo-500" />
+                                    <svg class="w-6 h-6 text-indigo-500" viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 2L22 20H2L12 2Z" />
+                                    </svg>
+                                    <span class="font-medium text-gray-700">Night</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        ${(state.newMedicine.dosage.morning || state.newMedicine.dosage.evening || state.newMedicine.dosage.night) ? `
+                            <div class="p-3 bg-gray-50 rounded-xl">
+                                <p class="text-sm text-gray-600 mb-2">Dosage Preview:</p>
+                                ${renderDosageShapes(state.newMedicine.dosage)}
+                            </div>
+                        ` : ''}
+
+                        <button onclick="addMedicine()" ${expired ? 'disabled' : ''} class="w-full py-3 rounded-xl font-semibold transition-all ${expired ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:shadow-lg hover:shadow-blue-200'}">
+                            Add Medicine to Bill
+                        </button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderCurrentBill() {
+            const total = getTotal();
+
+            return `
+                <div class="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+                    <div class="bg-gradient-to-r from-purple-600 to-indigo-600 text-white p-6">
+                        <div class="flex items-center gap-3">
+                            <div class="p-2 bg-white/20 rounded-lg">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                </svg>
+                            </div>
+                            <div>
+                                <h2 class="text-xl font-bold">Current Bill</h2>
+                                <p class="text-purple-200 text-sm">${state.currentMedicines.length} item(s)</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="p-6">
+                        ${state.selectedCustomer ? `
+                            <div class="bg-emerald-50 rounded-xl p-4 mb-4 border border-emerald-200">
+                                <div class="flex items-center gap-2 mb-2">
+                                    <svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                                    </svg>
+                                    <span class="font-semibold text-emerald-800">${state.selectedCustomer.name}</span>
+                                </div>
+                                <p class="text-sm text-emerald-600">${state.selectedCustomer.phone}</p>
+                                ${state.selectedCustomer.address ? `<p class="text-sm text-emerald-600 mt-1">${state.selectedCustomer.address}</p>` : ''}
+                            </div>
+                        ` : `
+                            <div class="bg-yellow-50 rounded-xl p-4 mb-4 border border-yellow-200">
+                                <p class="text-yellow-700 text-sm flex items-center gap-2">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                    </svg>
+                                    Please select or add a customer first
+                                </p>
+                            </div>
+                        `}
+
+                        ${state.currentMedicines.length === 0 ? `
+                            <div class="text-center py-8 text-gray-400">
+                                <svg class="w-16 h-16 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                                </svg>
+                                <p>No medicines added yet</p>
+                            </div>
+                        ` : `
+                            <div class="space-y-3 max-h-96 overflow-y-auto">
+                                ${state.currentMedicines.map(med => {
+                                    const nearExp = isNearExpiry(med.expiryDate);
+                                    const daysLeft = getDaysUntilExpiry(med.expiryDate);
+                                    return `
+                                        <div class="p-4 rounded-xl border ${nearExp ? 'bg-yellow-50 border-yellow-200' : 'bg-gray-50 border-gray-200'}">
+                                            <div class="flex justify-between items-start">
+                                                <div class="flex-1">
+                                                    <h4 class="font-semibold text-gray-800">${med.name}</h4>
+                                                    <div class="flex items-center gap-4 mt-2">
+                                                        <span class="text-sm text-gray-500">Qty: ${med.quantity}</span>
+                                                        <span class="text-sm font-medium text-gray-700">₹${med.price} each</span>
+                                                    </div>
+                                                    <div class="mt-2">
+                                                        ${renderDosageShapes(med.dosage, 'sm')}
+                                                    </div>
+                                                    <div class="mt-2 flex items-center gap-2">
+                                                        <span class="text-xs px-2 py-1 rounded-full ${nearExp ? 'bg-yellow-200 text-yellow-800' : 'bg-emerald-100 text-emerald-700'}">
+                                                            Exp: ${formatExpiryDate(med.expiryDate)}
+                                                        </span>
+                                                        ${nearExp ? `<span class="text-xs text-yellow-600 font-medium">(${daysLeft} days left)</span>` : ''}
+                                                    </div>
+                                                </div>
+                                                <div class="text-right">
+                                                    <p class="font-bold text-indigo-600">₹${(med.price * med.quantity).toFixed(2)}</p>
+                                                    <button onclick="removeMedicine('${med.id}')" class="text-red-500 hover:text-red-700 mt-2 text-sm flex items-center gap-1">
+                                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                        </svg>
+                                                        Remove
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    `;
+                                }).join('')}
+                            </div>
+                        `}
+
+                        ${state.currentMedicines.length > 0 ? `
+                            <div class="mt-6 pt-4 border-t border-gray-200">
+                                <div class="flex justify-between items-center">
+                                    <span class="text-lg font-semibold text-gray-700">Total</span>
+                                    <span class="text-2xl font-bold text-indigo-600">₹${total.toFixed(2)}</span>
+                                </div>
+                            </div>
+
+                            <div class="mt-6 space-y-3">
+                                <button onclick="generateReceipt()" ${!state.selectedCustomer ? 'disabled' : ''} class="w-full py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${state.selectedCustomer ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white hover:shadow-lg' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    Generate Receipt
+                                </button>
+                                <button onclick="clearBill()" class="w-full py-3 rounded-xl font-semibold bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 transition-all">
+                                    Clear Bill
+                                </button>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderHistoryTab() {
+            return `
+                <div class="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+                    <div class="bg-gradient-to-r from-slate-700 to-slate-800 text-white p-6">
+                        <div class="flex items-center gap-3">
+                            <div class="p-2 bg-white/20 rounded-lg">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <h2 class="text-xl font-bold">Transaction History</h2>
+                                <p class="text-slate-300 text-sm">${state.transactions.length} transactions</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="p-6">
+                        ${state.transactions.length === 0 ? `
+                            <div class="text-center py-8 text-gray-400">
+                                <svg class="w-16 h-16 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                </svg>
+                                <p>No transactions yet</p>
+                            </div>
+                        ` : `
+                            <div class="space-y-3 max-h-[600px] overflow-y-auto">
+                                ${state.transactions.slice().reverse().map(transaction => `
+                                    <div onclick="viewReceipt('${transaction.id}')" class="p-4 bg-gray-50 rounded-xl border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 transition-all cursor-pointer">
+                                        <div class="flex justify-between items-start">
+                                            <div>
+                                                <h4 class="font-semibold text-gray-800">${transaction.customer.name}</h4>
+                                                <p class="text-sm text-gray-500">${transaction.customer.phone}</p>
+                                                <p class="text-xs text-gray-400 mt-1">${formatDate(transaction.date)}</p>
+                                            </div>
+                                            <div class="text-right">
+                                                <p class="font-bold text-indigo-600">₹${transaction.totalAmount.toFixed(2)}</p>
+                                                <p class="text-xs text-gray-500">${transaction.medicines.length} items</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        `}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderCustomersTab() {
+            return `
+                <div class="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+                    <div class="bg-gradient-to-r from-rose-500 to-pink-600 text-white p-6">
+                        <div class="flex items-center gap-3">
+                            <div class="p-2 bg-white/20 rounded-lg">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                                </svg>
+                            </div>
+                            <div>
+                                <h2 class="text-xl font-bold">Saved Customers</h2>
+                                <p class="text-rose-200 text-sm">${state.customers.length} customers</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="p-6">
+                        ${state.customers.length === 0 ? `
+                            <div class="text-center py-8 text-gray-400">
+                                <svg class="w-16 h-16 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                                </svg>
+                                <p>No customers saved yet</p>
+                            </div>
+                        ` : `
+                            <div class="space-y-3 max-h-[600px] overflow-y-auto">
+                                ${state.customers.slice().reverse().map(customer => `
+                                    <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                                        <div class="flex justify-between items-start">
+                                            <div>
+                                                <h4 class="font-semibold text-gray-800">${customer.name}</h4>
+                                                <p class="text-sm text-gray-500">${customer.phone}</p>
+                                                ${customer.address ? `<p class="text-xs text-gray-400 mt-1">${customer.address}</p>` : ''}
+                                            </div>
+                                            <div class="text-right">
+                                                <span class="text-xs text-gray-400">Since ${formatExpiryDate(customer.createdAt)}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        `}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderReceiptModal() {
+            const transaction = state.showReceipt;
+            return `
+                <div id="receipt-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                        <div class="bg-gradient-to-r from-emerald-600 to-teal-600 text-white p-6 rounded-t-2xl">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center gap-3">
+                                    <div class="p-2 bg-white/20 rounded-lg">
+                                        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                                        </svg>
+                                    </div>
+                                    <div>
+                                        <h1 class="text-2xl font-bold">PharmaCare</h1>
+                                        <p class="text-emerald-100 text-sm">Your Trusted Pharmacy</p>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-sm text-emerald-100">Receipt #</p>
+                                    <p class="font-mono font-bold">${transaction.id.slice(-8).toUpperCase()}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="p-6 space-y-6" id="receipt-content">
+                            <div class="text-center pb-4 border-b border-dashed border-gray-300">
+                                <p class="text-gray-500 text-sm">${formatDate(transaction.date)}</p>
+                            </div>
+
+                            <div class="bg-gray-50 rounded-xl p-4">
+                                <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                                    <svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                                    </svg>
+                                    Customer Details
+                                </h3>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                                    <p><span class="text-gray-500">Name:</span> <span class="font-medium">${transaction.customer.name}</span></p>
+                                    <p><span class="text-gray-500">Phone:</span> <span class="font-medium">${transaction.customer.phone}</span></p>
+                                    ${transaction.customer.address ? `<p class="sm:col-span-2"><span class="text-gray-500">Address:</span> <span class="font-medium">${transaction.customer.address}</span></p>` : ''}
+                                </div>
+                            </div>
+
+                            ${renderDosageLegend()}
+
+                            <div>
+                                <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                                    <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                                    </svg>
+                                    Medicines Prescribed
+                                </h3>
+                                <div class="border border-gray-200 rounded-xl overflow-hidden">
+                                    <table class="w-full">
+                                        <thead class="bg-gray-50">
+                                            <tr>
+                                                <th class="text-left px-4 py-3 text-sm font-semibold text-gray-600">Medicine</th>
+                                                <th class="text-center px-4 py-3 text-sm font-semibold text-gray-600">Dosage</th>
+                                                <th class="text-center px-4 py-3 text-sm font-semibold text-gray-600">Qty</th>
+                                                <th class="text-center px-4 py-3 text-sm font-semibold text-gray-600">Expiry</th>
+                                                <th class="text-right px-4 py-3 text-sm font-semibold text-gray-600">Amount</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="divide-y divide-gray-100">
+                                            ${transaction.medicines.map(med => `
+                                                <tr class="hover:bg-gray-50">
+                                                    <td class="px-4 py-3">
+                                                        <p class="font-medium text-gray-800">${med.name}</p>
+                                                    </td>
+                                                    <td class="px-4 py-3">
+                                                        <div class="flex justify-center">
+                                                            ${renderDosageShapes(med.dosage, 'sm')}
+                                                        </div>
+                                                    </td>
+                                                    <td class="px-4 py-3 text-center text-gray-600">${med.quantity}</td>
+                                                    <td class="px-4 py-3 text-center">
+                                                        <span class="text-sm bg-amber-100 text-amber-700 px-2 py-1 rounded-full">
+                                                            ${formatExpiryDate(med.expiryDate)}
+                                                        </span>
+                                                    </td>
+                                                    <td class="px-4 py-3 text-right font-medium text-gray-800">
+                                                        ₹${(med.price * med.quantity).toFixed(2)}
+                                                    </td>
+                                                </tr>
+                                            `).join('')}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="bg-gradient-to-r from-emerald-50 to-teal-50 rounded-xl p-4 border border-emerald-200">
+                                <div class="flex justify-between items-center">
+                                    <span class="text-lg font-semibold text-gray-700">Total Amount</span>
+                                    <span class="text-2xl font-bold text-emerald-600">₹${transaction.totalAmount.toFixed(2)}</span>
+                                </div>
+                            </div>
+
+                            <div class="text-center pt-4 border-t border-dashed border-gray-300">
+                                <p class="text-gray-500 text-sm">Thank you for choosing PharmaCare!</p>
+                                <p class="text-gray-400 text-xs mt-1">Get well soon 💚</p>
+                            </div>
+                        </div>
+
+                        <div class="p-6 bg-gray-50 rounded-b-2xl flex gap-3 no-print">
+                            <button onclick="printReceipt()" class="flex-1 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl font-semibold hover:shadow-lg transition-all flex items-center justify-center gap-2">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                                </svg>
+                                Print Receipt
+                            </button>
+                            <button onclick="closeReceipt()" class="px-6 py-3 bg-gray-200 text-gray-700 rounded-xl font-semibold hover:bg-gray-300 transition-all">
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderFooter() {
+            return `
+                <footer class="bg-gray-800 text-gray-400 py-6 mt-12">
+                    <div class="max-w-7xl mx-auto px-4 text-center">
+                        <p class="text-sm">
+                            CareBox © ${new Date().getFullYear()} | Your Trusted Pharmacy Management System
+                        </p>
+                        <p class="text-xs mt-2 text-gray-500">
+                            ⬛ Morning | ⚫ Evening | 🔺 Night - Dosage Indicators
+                        </p>
+                    </div>
+                </footer>
+            `;
+        }
+
+        // Event Handlers
+        function setActiveTab(tab) {
+            state.activeTab = tab;
+            render();
+        }
+
+        function selectCustomer(id) {
+            state.selectedCustomer = state.customers.find(c => c.id === id);
+            state.searchPhone = '';
+            render();
+        }
+
+        function toggleNewForm() {
+            state.showNewForm = true;
+            render();
+        }
+
+        function cancelNewCustomer() {
+            state.showNewForm = false;
+            state.newCustomer = { name: '', phone: '', address: '' };
+            render();
+        }
+
+        function saveNewCustomer() {
+            const name = document.getElementById('newCustomerName').value;
+            const phone = document.getElementById('newCustomerPhone').value;
+            const address = document.getElementById('newCustomerAddress').value;
+
+            if (!name || !phone) {
+                alert('Please fill in name and phone number');
+                return;
+            }
+
+            const customer = {
+                id: Date.now().toString(),
+                name,
+                phone,
+                address,
+                createdAt: new Date().toISOString()
+            };
+
+            state.customers.push(customer);
+            state.selectedCustomer = customer;
+            state.showNewForm = false;
+            state.newCustomer = { name: '', phone: '', address: '' };
+            saveToLocalStorage();
+            render();
+        }
+
+        function addMedicine() {
+            const name = document.getElementById('medicineName').value;
+            const quantity = parseInt(document.getElementById('medicineQuantity').value) || 1;
+            const price = parseFloat(document.getElementById('medicinePrice').value) || 0;
+            const expiryDate = document.getElementById('medicineExpiry').value;
+            const morning = document.getElementById('dosageMorning').checked;
+            const evening = document.getElementById('dosageEvening').checked;
+            const night = document.getElementById('dosageNight').checked;
+
+            if (!name || !expiryDate || price <= 0) {
+                alert('Please fill in all required fields');
+                return;
+            }
+
+            if (isExpired(expiryDate)) {
+                alert('⚠️ WARNING: This medicine is EXPIRED! Cannot add expired medicine.');
+                return;
+            }
+
+            const medicine = {
+                id: Date.now().toString(),
+                name,
+                quantity,
+                price,
+                expiryDate,
+                dosage: { morning, evening, night }
+            };
+
+            state.currentMedicines.push(medicine);
+            state.newMedicine = {
+                name: '',
+                quantity: 1,
+                price: 0,
+                expiryDate: '',
+                dosage: { morning: false, evening: false, night: false }
+            };
+            render();
+        }
+
+        function removeMedicine(id) {
+            state.currentMedicines = state.currentMedicines.filter(m => m.id !== id);
+            render();
+        }
+
+        function clearBill() {
+            state.selectedCustomer = null;
+            state.currentMedicines = [];
+            render();
+        }
+
+        function generateReceipt() {
+            if (!state.selectedCustomer || state.currentMedicines.length === 0) return;
+
+            const transaction = {
+                id: Date.now().toString(),
+                customer: state.selectedCustomer,
+                medicines: state.currentMedicines,
+                totalAmount: getTotal(),
+                date: new Date().toISOString()
+            };
+
+            state.transactions.push(transaction);
+            state.showReceipt = transaction;
+            state.selectedCustomer = null;
+            state.currentMedicines = [];
+            saveToLocalStorage();
+            render();
+        }
+
+        function viewReceipt(id) {
+            state.showReceipt = state.transactions.find(t => t.id === id);
+            render();
+        }
+
+        function closeReceipt() {
+            state.showReceipt = null;
+            render();
+        }
+
+        function printReceipt() {
+            window.print();
+        }
+
+        function attachEventListeners() {
+            const searchPhone = document.getElementById('searchPhone');
+            if (searchPhone) {
+                searchPhone.addEventListener('input', (e) => {
+                    state.searchPhone = e.target.value;
+                    render();
+                });
+            }
+
+            // Medicine form listeners
+            const medicineName = document.getElementById('medicineName');
+            const medicineQuantity = document.getElementById('medicineQuantity');
+            const medicinePrice = document.getElementById('medicinePrice');
+            const medicineExpiry = document.getElementById('medicineExpiry');
+            const dosageMorning = document.getElementById('dosageMorning');
+            const dosageEvening = document.getElementById('dosageEvening');
+            const dosageNight = document.getElementById('dosageNight');
+
+            if (medicineName) {
+                medicineName.addEventListener('input', (e) => {
+                    state.newMedicine.name = e.target.value;
+                });
+            }
+            if (medicineQuantity) {
+                medicineQuantity.addEventListener('input', (e) => {
+                    state.newMedicine.quantity = parseInt(e.target.value) || 1;
+                });
+            }
+            if (medicinePrice) {
+                medicinePrice.addEventListener('input', (e) => {
+                    state.newMedicine.price = parseFloat(e.target.value) || 0;
+                });
+            }
+            if (medicineExpiry) {
+                medicineExpiry.addEventListener('input', (e) => {
+                    state.newMedicine.expiryDate = e.target.value;
+                    render();
+                });
+            }
+            if (dosageMorning) {
+                dosageMorning.addEventListener('change', (e) => {
+                    state.newMedicine.dosage.morning = e.target.checked;
+                    render();
+                });
+            }
+            if (dosageEvening) {
+                dosageEvening.addEventListener('change', (e) => {
+                    state.newMedicine.dosage.evening = e.target.checked;
+                    render();
+                });
+            }
+            if (dosageNight) {
+                dosageNight.addEventListener('change', (e) => {
+                    state.newMedicine.dosage.night = e.target.checked;
+                    render();
+                });
+            }
+        }
+
+        // Initialize
+        render();
+    </script>
+</body>
+</html>
